@@ -97,8 +97,11 @@ services:
     <<: *app
     image: vcnafacul/ms-omr:${OMR_TAG:-latest}
     env_file: ["${ENV_DIR:-/home/deploy/env}/.env.omr"]
-    # Sem limite, como no subir_ms_omr.sh. Definir no card 05 depois de medir
-    # com `docker stats` lendo um cartão (OpenCV é o serviço mais pesado).
+    # Pico medido em homol lendo um cartão: 296 MiB (memory.peak, 2026-11-01).
+    # Limite ~1,5x. Sem limite de CPU: é o serviço que mais usa CPU, e na VPS de
+    # 1 vCPU um teto só deixaria a leitura mais lenta. OMR_MAX_WORKERS=1.
+    mem_limit: 450m
+    memswap_limit: 900m
     networks:
       default:
         aliases: [vcnafacul_ms_omr] # OMR_URL do ms-simulado
