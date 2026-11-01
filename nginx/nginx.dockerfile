@@ -10,6 +10,7 @@ RUN apt-get update \
 # homol usa default.conf; prod passa CONF=prod.conf (docker-compose.prod.yml)
 ARG CONF=default.conf
 COPY ${CONF} /etc/nginx/conf.d/default.conf
+COPY gzip.conf /etc/nginx/conf.d/gzip.conf
 
 EXPOSE 80 443
 CMD ["nginx", "-g", "daemon off;"]
