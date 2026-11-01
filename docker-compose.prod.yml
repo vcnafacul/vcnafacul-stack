@@ -1,0 +1,145 @@
+# docker-compose.prod.yml — o stack no SERVIDOR de produção (tickets/057).
+#
+# Não use direto: o deploy é sempre pelo ./deploy.sh com .ambiente=prod, que
+# fixa o projeto (`-p vcnafacul`), lê as tags de .tags.env e sobe um serviço
+# por vez. Tag padrão: stable; o ci-prod passa a versão (deploy.sh api 1.9.0).
+#
+# Mesmo desenho do docker-compose.homol.yml, com o que prod tem de diferente:
+#   - VPS de 2 vCPU / 8 GB (limites medidos em repouso em 2026-11-01: api 139M,
+#     ms 81M, form 80M, ms-omr 52M; pico do ms-omr lendo cartão 296M em homol);
+#   - fila no Valkey (persistente, AOF), sem Redis efêmero nem Mailpit (SMTP real);
+#   - ms-simulado com o nome antigo vcnafacul_simulado_prod;
+#   - um domínio só (api.vcnafacul.com.br), sem a pasta Questoes (imagens no R2).
+#
+# Bancos (MariaDB, Mongo Atlas) e bucket (R2) vêm dos arquivos em ENV_DIR.
+
+x-app: &app
+  restart: unless-stopped
+
+networks:
+  # Rede dos scripts antigos, externa durante a transição (aliases abaixo).
+  default:
+    name: network-vcnafacul
+    external: true
+
+services:
+  api:
+    <<: *app
+    image: vcnafacul/api:${API_TAG:-stable}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env"]
+    mem_limit: 768m
+    memswap_limit: 768m
+    networks:
+      default:
+        aliases: [vcnafacul] # proxy_pass do nginx: http://vcnafacul:3333
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:$${API_PORT:-3333}/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+
+  # One-shot: o deploy.sh roda antes de recriar a api. Falhou → a api antiga segue no ar.
+  api-migrate:
+    image: vcnafacul/api:${API_TAG:-stable}
+    profiles: [migrate]
+    restart: "no"
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env"]
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        node --require ts-node/register ./node_modules/typeorm/cli.js -d db/data-source-cli.js migration:show || true;
+        node --require ts-node/register ./node_modules/typeorm/cli.js -d db/data-source-cli.js migration:run
+
+  ms-simulado:
+    <<: *app
+    image: vcnafacul/simulado:${MS_TAG:-stable}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env.ms"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    networks:
+      default:
+        aliases: [vcnafacul_simulado_prod] # SIMULADO_URL da api, CALLBACK_URL do ms-omr
+    healthcheck:
+      # qualquer resposta HTTP = de pé (o CMD da imagem migra antes do app)
+      test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:$${MS_PORT:-$${PORT:-3000}}/api 2>&1 | grep -q 'HTTP/'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  form:
+    <<: *app
+    image: vcnafacul/form:${FORM_TAG:-stable}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env.form"]
+    mem_limit: 384m
+    memswap_limit: 384m
+    networks:
+      default:
+        aliases: [vcnafacul_form] # FORMULARIO_URL da api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:$${PORT:-3001}/ 2>&1 | grep -q 'HTTP/'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  ms-omr:
+    <<: *app
+    image: vcnafacul/ms-omr:${OMR_TAG:-stable}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env.omr"]
+    # pico lendo cartão: 296 MiB (homol); folga para 2 leituras se OMR_MAX_WORKERS subir
+    mem_limit: 768m
+    memswap_limit: 768m
+    networks:
+      default:
+        aliases: [vcnafacul_ms_omr] # OMR_URL do ms-simulado
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  valkey:
+    <<: *app
+    image: valkey/valkey:8.1
+    # Sem porta publicada (a 6379 aberta na internet teve senha posta por
+    # terceiros — 057/01). AOF: a fila sobrevive a reboot.
+    command: ["valkey-server", "--appendonly", "yes"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes: ["valkey_data:/data"]
+    networks:
+      default:
+        aliases: [valkey] # REDIS_HOST / REDIS_URL nos .env
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  nginx:
+    <<: *app
+    build:
+      context: ./nginx
+      dockerfile: nginx.dockerfile
+      args:
+        CONF: prod.conf
+    image: vcnafacul-stack/nginx:prod
+    ports: ["80:80", "443:443"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    volumes:
+      - ${LETSENCRYPT_DIR:-/home/deploy/letsencrypt}:/etc/letsencrypt
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t -q || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  # O volume do Valkey recriado à mão em 2026-11-01 (docker run -v valkey_data).
+  valkey_data:
+    external: true
+    name: valkey_data

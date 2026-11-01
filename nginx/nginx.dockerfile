@@ -7,7 +7,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends certbot python3-certbot-nginx \
     && rm -rf /var/lib/apt/lists/*
 
-COPY default.conf /etc/nginx/conf.d/default.conf
+# homol usa default.conf; prod passa CONF=prod.conf (docker-compose.prod.yml)
+ARG CONF=default.conf
+COPY ${CONF} /etc/nginx/conf.d/default.conf
 
 EXPOSE 80 443
 CMD ["nginx", "-g", "daemon off;"]
