@@ -34,6 +34,15 @@ HISTORICO=.tags.history
 ESPERA_SAUDE=${ESPERA_SAUDE:-120}   # segundos até o serviço ficar healthy
 
 touch "$TAGS" "$HISTORICO"
+
+# Um deploy por vez no servidor: merges em vários repos disparam deploys
+# simultâneos, e o `docker image prune` do fim de um apagava camadas que outro
+# ainda estava baixando ("lease does not exist"). O lock espera a vez (até 15 min).
+exec 9>.deploy.lock
+if command -v flock >/dev/null 2>&1; then
+  info "aguardando outro deploy terminar (se houver)"
+  flock -w 900 9 || erro "outro deploy segurou o lock por mais de 15 min"
+fi
 compose() { docker compose -p "$PROJETO" --env-file "$TAGS" -f "$ARQUIVO" "$@"; }
 
 # serviço → variável da tag no compose (vazio = imagem fixa no compose ou build)
