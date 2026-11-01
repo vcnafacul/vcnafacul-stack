@@ -71,9 +71,11 @@ gravar_tag() {
 conferir_transicao() {
   local antigo
   antigo=$(container_antigo "$1")
-  if docker inspect "$antigo" >/dev/null 2>&1; then
+  # --type container: sem ele o inspect também acha IMAGEM com esse nome (a do
+  # nginx antigo chama nginx_vcnafacul) e a trava recusa sem container nenhum.
+  if docker inspect --type container "$antigo" >/dev/null 2>&1; then
     local projeto
-    projeto=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$antigo" 2>/dev/null || true)
+    projeto=$(docker inspect --type container -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$antigo" 2>/dev/null || true)
     if [ "$projeto" != "$PROJETO" ]; then
       erro "o container antigo '$antigo' (subir_*.sh) ainda existe. Na troca: docker rm -f $antigo   (plano B: ~/subir_*.sh)"
     fi
