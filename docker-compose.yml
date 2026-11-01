@@ -1,0 +1,141 @@
+# docker-compose.yml — base dos DOIS modos (tickets/055).
+#
+#   modo local  = este arquivo + docker-compose.dados-locais.yml  (make up)
+#   modo homol  = só este arquivo                                  (make up-homol)
+#
+# Cada app lê o `.env` do PRÓPRIO repo (env_file). O bloco `environment` vence
+# o env_file e sobrescreve só o que tem de ser diferente dentro do docker:
+#   - endereços entre serviços (nos .env eles são `localhost`, que dentro do
+#     container é o próprio container);
+#   - e-mail sempre no Mailpit (nenhum e-mail sai de verdade, nem no modo homol);
+#   - segredos compartilhados entre serviços, vindos do .env.compose.
+# Bancos e bucket NÃO são sobrescritos aqui: no modo homol eles vêm do .env.
+#
+# Os repos ficam ao lado deste: ../api-vcnafacul, ../ms-simulado, ../ms-omr,
+# ../vcnafacul-form, ../client-vcnafacul.
+
+x-node-app: &node-app
+  image: node:20-alpine
+  working_dir: /app
+  restart: unless-stopped
+
+services:
+  # ---------------- infra sempre local ----------------
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports: ["8025:8025", "1025:1025"]
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    volumes: ["mailpit_data:/data"]
+    restart: unless-stopped
+
+  # ---------------- apps ----------------
+  api:
+    <<: *node-app
+    command: sh -c "yarn install --frozen-lockfile --ignore-engines && yarn dev"
+    ports: ["3333:3333"]
+    env_file: ["../api-vcnafacul/.env"]
+    environment:
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      API_PORT: "3333"
+      FRONT_URL: http://localhost:5173
+      SIMULADO_URL: http://ms-simulado:3000
+      FORMULARIO_URL: http://form:3334
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      USE_SMTP_FAKE: "true"
+      SMTP_FAKE_HOST: mailpit
+      SMTP_FAKE_PORT: "1025"
+      ADMIN_FORM_SECRET: ${ADMIN_FORM_SECRET:?defina no .env.compose}
+      NOTIFICACAO_SECRET: ${NOTIFICACAO_SECRET:?defina no .env.compose}
+    volumes:
+      - ../api-vcnafacul:/app
+      - api_node_modules:/app/node_modules
+    depends_on:
+      redis: { condition: service_healthy }
+      mailpit: { condition: service_started }
+
+  ms-simulado:
+    <<: *node-app
+    command: sh -c "yarn install --frozen-lockfile --ignore-engines && yarn dev"
+    ports: ["3000:3000"]
+    env_file: ["../ms-simulado/.env"]
+    environment:
+      # o main.ts lê MS_PORT antes de PORT; o .env real usa MS_PORT
+      MS_PORT: "3000"
+      PORT: "3000"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      OMR_URL: http://ms-omr:8000
+      API_URL: http://api:3333
+      NOTIFICACAO_SECRET: ${NOTIFICACAO_SECRET:?defina no .env.compose}
+    volumes:
+      - ../ms-simulado:/app
+      - ms_node_modules:/app/node_modules
+    depends_on:
+      redis: { condition: service_healthy }
+
+  ms-omr:
+    build:
+      context: ../ms-omr
+      dockerfile: omr.dockerfile
+    image: vcnafacul-stack/ms-omr:local
+    ports: ["8000:8000"]
+    env_file: ["../ms-omr/.env"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CALLBACK_URL: http://ms-simulado:3000/v1/cartao-resposta/callback
+      # worker do arq dentro do processo da API (um consumidor só)
+      OMR_INPROCESS_WORKER: "true"
+    restart: unless-stopped
+    depends_on:
+      redis: { condition: service_healthy }
+
+  form:
+    <<: *node-app
+    command: sh -c "yarn install --frozen-lockfile --ignore-engines && yarn dev"
+    ports: ["3334:3334"]
+    env_file: ["../vcnafacul-form/.env"]
+    environment:
+      PORT: "3334"
+      ADMIN_FORM_SECRET: ${ADMIN_FORM_SECRET:?defina no .env.compose}
+    volumes:
+      - ../vcnafacul-form:/app
+      - form_node_modules:/app/node_modules
+
+  client:
+    <<: *node-app
+    command: sh -c "yarn install --frozen-lockfile --ignore-engines && yarn dev --host 0.0.0.0 --port 5173"
+    ports: ["5173:5173"]
+    environment:
+      # lido pelo BROWSER (no host), não pela rede do docker
+      VITE_BASE_URL: http://localhost:3333
+    volumes:
+      - ../client-vcnafacul:/app
+      - client_node_modules:/app/node_modules
+    depends_on:
+      api: { condition: service_started }
+
+volumes:
+  mailpit_data:
+  # node_modules em volume: os binários do alpine não se misturam com os do
+  # macOS no bind-mount. Externos (criados pelo Makefile) para os dois modos
+  # reaproveitarem o mesmo install.
+  api_node_modules: { external: true, name: vcnafacul-stack_api_node_modules }
+  ms_node_modules: { external: true, name: vcnafacul-stack_ms_node_modules }
+  form_node_modules: { external: true, name: vcnafacul-stack_form_node_modules }
+  client_node_modules: { external: true, name: vcnafacul-stack_client_node_modules }

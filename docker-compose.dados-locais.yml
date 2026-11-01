@@ -1,0 +1,161 @@
+# docker-compose.dados-locais.yml — só no MODO LOCAL (make up).
+#
+# Sobe MySQL, Mongo (replica set) e MinIO e aponta TODOS os apps para eles,
+# vencendo o .env de cada repo. ⚠️ O api-vcnafacul/.env real aponta para um
+# MySQL remoto: os MY_* abaixo são obrigatórios, e o `make up` confere com
+# scripts/conferir-modo-local.py antes de subir.
+
+x-minio-cred: &minio-cred
+  AWS_ENDPOINT: http://minio:9000
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin123
+
+x-mysql-cred: &mysql-cred
+  MY_HOST: mysql
+  MY_PORT: "3306"
+  MY_USER: root
+  MY_PASSWORD: "123456"
+  MY_DB_NAME: vcnafacul
+
+# Buckets com os nomes que o minio-init cria (o .env real usa os nomes do R2).
+x-api-buckets: &api-buckets
+  BUCKET_DOC: vcnafacul-docs
+  BUCKET_STUDENT_DOC: vcnafacul-docs
+  BUCKET_PROFILE: vcnafacul-students-photo
+  BUCKET_QUESTION: simulado-questoes
+  BUCKET_SIMULADO: vcnafacul-simulado
+  BUCKET_CONTENT: vcnafacul-content
+  BUCKET_NEWS: vcnafacul-news
+  BUCKET_HOME: vcnafacul-home
+  BUCKET_PARTNERSHIP_DOC: vcnafacul-partnership-doc
+  BUCKET_ESSAY: vcnafacul-essays
+  BUCKET_CARTAO: vcnafacul-cartoes
+
+services:
+  # ---------------- bancos e bucket locais ----------------
+  mysql:
+    image: mysql:8.0
+    ports: ["3306:3306"]
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: vcnafacul
+    volumes: ["mysql_data:/var/lib/mysql"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p123456"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mongo:
+    image: mongo:8.0
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports: ["27017:27017"]
+    volumes: ["mongo_data:/data/db"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  # one-shot: inicia o replica set (idempotente)
+  mongo-init:
+    image: mongo:8.0
+    restart: "no"
+    depends_on:
+      mongo: { condition: service_healthy }
+    entrypoint: >
+      mongosh --host mongo --quiet --eval '
+        try { rs.status(); print("replica set ja iniciado"); }
+        catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongo:27017" }] }); print("replica set iniciado"); }
+        let ok = false;
+        for (let i = 0; i < 30 && !ok; i++) { ok = db.hello().isWritablePrimary; if (!ok) sleep(1000); }
+        if (!ok) { print("primario nao ficou pronto"); quit(1); }
+      '
+
+  # S3 local. O MinIO saiu do Docker Hub (set/2026); o pgsty/silo é um fork
+  # compatível (mesmo `server`, console, health e `mc` dentro da imagem).
+  minio:
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
+    command: server /data --console-address ":9001"
+    ports: ["9000:9000", "9001:9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes: ["minio_data:/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  # one-shot: cria os buckets (idempotente)
+  minio-init:
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
+    restart: "no"
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c '
+        mc alias set local http://minio:9000 minioadmin minioadmin123 &&
+        for b in vcnafacul-docs vcnafacul-students-photo simulado-questoes vcnafacul-simulado vcnafacul-content vcnafacul-news vcnafacul-home vcnafacul-partnership-doc vcnafacul-essays vcnafacul-cartoes; do
+          mc mb --ignore-existing local/$$b || exit 1;
+        done &&
+        echo "buckets ok"
+      '
+
+  # one-shot: migrations do MySQL antes da api subir
+  api-migrate:
+    image: node:20-alpine
+    working_dir: /app
+    restart: "no"
+    command: sh -c "yarn install --frozen-lockfile --ignore-engines && yarn migration:run"
+    env_file: ["../api-vcnafacul/.env"]
+    environment:
+      <<: *mysql-cred
+    volumes:
+      - ../api-vcnafacul:/app
+      - api_node_modules:/app/node_modules
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  # ---------------- apps apontando para os dados locais ----------------
+  api:
+    environment:
+      <<: [*mysql-cred, *minio-cred, *api-buckets]
+    depends_on:
+      api-migrate: { condition: service_completed_successfully }
+      minio-init: { condition: service_completed_successfully }
+
+  ms-simulado:
+    # migrações e seeds do Mongo (src/migracoes) antes do dev
+    command: sh -c "yarn install --frozen-lockfile --ignore-engines && yarn migracoes && yarn dev"
+    environment:
+      <<: *minio-cred
+      MONGODB: mongodb://mongo:27017/simulado?replicaSet=rs0
+      CARTAO_BUCKET: vcnafacul-cartoes
+      QUESTAO_BUCKET: simulado-questoes
+    depends_on:
+      mongo-init: { condition: service_completed_successfully }
+      minio-init: { condition: service_completed_successfully }
+
+  ms-omr:
+    environment:
+      <<: *minio-cred
+      OMR_BUCKET: vcnafacul-cartoes
+    depends_on:
+      minio-init: { condition: service_completed_successfully }
+
+  form:
+    environment:
+      MONGODB: mongodb://mongo:27017/form?replicaSet=rs0
+    depends_on:
+      mongo-init: { condition: service_completed_successfully }
+
+volumes:
+  mysql_data:
+  mongo_data:
+  minio_data:
