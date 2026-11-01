@@ -129,7 +129,7 @@ Serviços: `api` `ms-simulado` `form` `ms-omr` `redis` `mailpit` `nginx`. Os con
 ### Primeira vez no servidor
 
 ```bash
-git clone git@github.com:vcnafacul/vcnafacul-stack.git ~/stack     # deploy key só leitura
+git clone https://github.com/vcnafacul/vcnafacul-stack.git ~/stack   # repo público: sem chave
 mkdir -p ~/stack-segredos
 read -s -p "senha do mail.homol: " S; echo
 printf 'vcnafacul:%s\n' "$(openssl passwd -apr1 "$S")" > ~/stack-segredos/mail.htpasswd; unset S
