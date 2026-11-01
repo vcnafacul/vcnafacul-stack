@@ -98,16 +98,16 @@ Do mais fraco para o mais forte:
 - `node_modules` de cada app fica num volume (`vcnafacul-stack_*_node_modules`), compartilhado entre os modos.
   Dependência nova no `package.json` → `make restart s=<app>` (o `yarn install` roda no início do comando).
 
-## Homol (servidor) — `docker-compose.homol.yml` + `deploy.sh`
+## Homol e prod (servidores) — `docker-compose.{homol,prod}.yml` + `deploy.sh`
 
-Origem: `tickets/056`. No servidor de homol o stack roda com as **imagens do Docker Hub** (não bind-mount), sem
+Origem: `tickets/056` (homol) e `tickets/057` (prod). O arquivo `~/stack/.ambiente` (`homol` | `prod`) escolhe o compose e a tag padrão (`latest` | `stable`; em prod o CI passa a versão, `deploy.sh api 1.9.0`). Prod: sem Mailpit (SMTP real), fila no Valkey persistente, um domínio só. No servidor o stack roda com as **imagens do Docker Hub** (não bind-mount), sem
 bancos (MariaDB e Atlas ficam fora) e com o nginx na frente. Os `.env` continuam em `~/env/`, fora do git.
 
 ```
 ~/stack/            # clone deste repo
 ~/env/              # .env (api), .env.ms, .env.form, .env.omr — como já é hoje
 ~/stack-segredos/   # mail.htpasswd (senha do mail.homol)
-~/letsencrypt/  ~/Questoes/
+~/letsencrypt/
 ```
 
 ### Deploy de um serviço
@@ -129,6 +129,7 @@ Serviços: `api` `ms-simulado` `form` `ms-omr` `redis` `mailpit` `nginx`. Os con
 ### Primeira vez no servidor
 
 ```bash
+echo homol > ~/stack/.ambiente      # ou prod — o deploy.sh recusa sem ele
 git clone https://github.com/vcnafacul/vcnafacul-stack.git ~/stack   # repo público: sem chave
 mkdir -p ~/stack-segredos
 read -s -p "senha do mail.homol: " S; echo

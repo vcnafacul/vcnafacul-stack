@@ -5,9 +5,11 @@
 set -euo pipefail
 
 STACK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+AMBIENTE=$(tr -d '[:space:]' <"$STACK_DIR/.ambiente" 2>/dev/null || true)
+[ "$AMBIENTE" = homol ] || [ "$AMBIENTE" = prod ] || { echo "❌ defina $STACK_DIR/.ambiente (homol ou prod)" >&2; exit 1; }
 marcador="# certbot-renew-vcnafacul-stack"
 marcador_antigo="# certbot-renew-nginx_vcnafacul"
-linha="0 3 * * * cd $STACK_DIR && docker compose -p vcnafacul --env-file .tags.env -f docker-compose.homol.yml exec -T nginx certbot renew --quiet --deploy-hook 'nginx -s reload' $marcador"
+linha="0 3 * * * cd $STACK_DIR && docker compose -p vcnafacul --env-file .tags.env -f docker-compose.$AMBIENTE.yml exec -T nginx certbot renew --quiet --deploy-hook 'nginx -s reload' $marcador"
 
 atual="$(crontab -l 2>/dev/null || true)"
 novo="$(printf '%s\n' "$atual" | grep -Fv "$marcador" | grep -Fv "$marcador_antigo" || true)"

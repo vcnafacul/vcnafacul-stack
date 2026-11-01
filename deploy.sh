@@ -1,30 +1,40 @@
 #!/usr/bin/env bash
-# deploy.sh — sobe UM serviço do stack de homol, sem mexer nos outros (tickets/056).
+# deploy.sh — sobe UM serviço do stack, sem mexer nos outros (tickets/056 e 057).
 #
-#   ./deploy.sh <serviço> [tag]      tag padrão: latest
+#   ./deploy.sh <serviço> [tag]      tag padrão: latest (homol) | stable (prod)
 #   ./deploy.sh rollback <serviço>   volta para a tag anterior desse serviço
 #   ./deploy.sh status               serviços, tags em uso e saúde
 #
-# Serviços: api ms-simulado form ms-omr redis mailpit nginx
+# Serviços: api ms-simulado form ms-omr nginx + redis mailpit (homol) | valkey (prod)
 #
-# O CI chama `~/stack/deploy.sh <serviço> <sha-do-commit>` por SSH. As tags
+# O ambiente vem de .ambiente (homol | prod), um arquivo por servidor, fora do
+# git — sem ele o script recusa, para nunca usar o compose de um no outro.
+# O CI chama `~/stack/deploy.sh <serviço> <sha | versão>` por SSH. As tags
 # ficam em .tags.env (uma linha por app) e o histórico em .tags.history — os
 # dois fora do git.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
+erro() { echo "❌ $*" >&2; exit 1; }
+info() { echo "→ $*"; }
+
+[ -f .ambiente ] || erro "defina o ambiente deste servidor: echo homol > $(pwd)/.ambiente  (ou prod)"
+AMBIENTE=$(tr -d '[:space:]' <.ambiente)
+case "$AMBIENTE" in
+  homol) ARQUIVO_PADRAO=docker-compose.homol.yml TAG_PADRAO=latest ;;
+  prod) ARQUIVO_PADRAO=docker-compose.prod.yml TAG_PADRAO=stable ;;
+  *) erro ".ambiente com valor inválido: '$AMBIENTE' (use homol ou prod)" ;;
+esac
+
 PROJETO=vcnafacul
-ARQUIVO=${ARQUIVO:-docker-compose.homol.yml}  # outro arquivo só para teste local
+ARQUIVO=${ARQUIVO:-$ARQUIVO_PADRAO}  # outro arquivo só para teste local
 TAGS=.tags.env
 HISTORICO=.tags.history
 ESPERA_SAUDE=${ESPERA_SAUDE:-120}   # segundos até o serviço ficar healthy
 
 touch "$TAGS" "$HISTORICO"
 compose() { docker compose -p "$PROJETO" --env-file "$TAGS" -f "$ARQUIVO" "$@"; }
-
-erro() { echo "❌ $*" >&2; exit 1; }
-info() { echo "→ $*"; }
 
 # serviço → variável da tag no compose (vazio = imagem fixa no compose ou build)
 variavel_da_tag() {
@@ -33,8 +43,8 @@ variavel_da_tag() {
     ms-simulado) echo MS_TAG ;;
     form) echo FORM_TAG ;;
     ms-omr) echo OMR_TAG ;;
-    redis | mailpit | nginx) echo "" ;;
-    *) erro "serviço desconhecido: $1 (use: api ms-simulado form ms-omr redis mailpit nginx)" ;;
+    redis | mailpit | valkey | nginx) echo "" ;;
+    *) erro "serviço desconhecido: $1 (use: api ms-simulado form ms-omr nginx redis mailpit valkey)" ;;
   esac
 }
 
@@ -42,11 +52,12 @@ variavel_da_tag() {
 container_antigo() {
   case "$1" in
     api) echo vcnafacul ;;
-    ms-simulado) echo vcnafacul_simulado_homol ;;
+    ms-simulado) echo "vcnafacul_simulado_$AMBIENTE" ;;
     form) echo vcnafacul_form ;;
     ms-omr) echo vcnafacul_ms_omr ;;
     redis) echo vcnafacul_redis ;;
     mailpit) echo mailpit ;;
+    valkey) echo valkey ;;
     nginx) echo nginx_vcnafacul ;;
   esac
 }
@@ -103,7 +114,7 @@ esperar_saude() {
 }
 
 deploy() {
-  local servico=$1 tag=${2:-latest} var
+  local servico=$1 tag=${2:-$TAG_PADRAO} var
   var=$(variavel_da_tag "$servico")
 
   if [ "${DEPLOY_SEM_PULL:-0}" != 1 ] && [ -d .git ]; then
@@ -155,6 +166,7 @@ rollback() {
 }
 
 status() {
+  echo "ambiente: $AMBIENTE ($ARQUIVO)"
   compose ps -a --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'
   echo
   echo "tags (.tags.env):"
@@ -165,5 +177,5 @@ case "${1:-}" in
   "" | -h | --help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
   rollback) rollback "${2:-}" ;;
   status) status ;;
-  *) deploy "$1" "${2:-latest}" ;;
+  *) deploy "$1" "${2:-$TAG_PADRAO}" ;;
 esac
