@@ -1,0 +1,159 @@
+# docker-compose.homol.yml — o stack no SERVIDOR de homol (tickets/056).
+#
+# Não use direto: o deploy é sempre pelo ./deploy.sh, que fixa o projeto
+# (`-p vcnafacul`), lê as tags de .tags.env e sobe um serviço por vez.
+#
+# Reproduz, flag a flag, os ~/subir_*.sh de antes (imagem, limites, env, rede,
+# volume). Diferenças de propósito:
+#   - imagem por tag do commit (rollback), não só :latest;
+#   - migration da api ANTES do app (api-migrate), não depois;
+#   - nenhuma porta publicada fora o nginx (80/443) — o nginx chega na api e no
+#     Mailpit pela rede do docker;
+#   - healthcheck em todos.
+#
+# Bancos (MariaDB da Hostinger, Mongo Atlas) e bucket (R2) ficam FORA: vêm dos
+# arquivos em ENV_DIR (~/env), que continuam fora do git.
+
+x-app: &app
+  restart: unless-stopped
+
+networks:
+  # A rede dos scripts antigos. Externa durante a transição: os containers do
+  # compose e os dos subir_*.sh se enxergam pelos mesmos nomes (aliases abaixo).
+  default:
+    name: network-vcnafacul
+    external: true
+
+services:
+  api:
+    <<: *app
+    image: vcnafacul/api:${API_TAG:-latest}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env"]
+    mem_limit: 350m
+    memswap_limit: 700m
+    cpus: 0.8
+    volumes:
+      - ${QUESTOES_DIR:-/home/deploy/Questoes}:/usr/share/nginx/html/images
+    networks:
+      default:
+        aliases: [vcnafacul] # proxy_pass do nginx: http://vcnafacul:3333
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:$${API_PORT:-3333}/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+
+  # One-shot: o deploy.sh roda antes de recriar a api. Falhou → a api antiga segue no ar.
+  api-migrate:
+    image: vcnafacul/api:${API_TAG:-latest}
+    profiles: [migrate]
+    restart: "no"
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env"]
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        node --require ts-node/register ./node_modules/typeorm/cli.js -d db/data-source-cli.js migration:show || true;
+        node --require ts-node/register ./node_modules/typeorm/cli.js -d db/data-source-cli.js migration:run
+
+  ms-simulado:
+    <<: *app
+    image: vcnafacul/simulado:${MS_TAG:-latest}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env.ms"]
+    mem_limit: 200m
+    memswap_limit: 400m
+    cpus: 0.5
+    networks:
+      default:
+        aliases: [vcnafacul_simulado_homol] # SIMULADO_URL da api, CALLBACK_URL do ms-omr
+    healthcheck:
+      # qualquer resposta HTTP = de pé. wget (busybox) e não node: um 2º node no
+      # container estoura o limite de 200m. O CMD da imagem migra antes do app.
+      test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:$${MS_PORT:-$${PORT:-3000}}/api 2>&1 | grep -q 'HTTP/'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  form:
+    <<: *app
+    image: vcnafacul/form:${FORM_TAG:-latest}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env.form"]
+    mem_limit: 200m
+    memswap_limit: 400m
+    cpus: 0.5
+    networks:
+      default:
+        aliases: [vcnafacul_form] # FORMULARIO_URL da api (porta do .env.form, hoje 3001)
+    healthcheck:
+      # qualquer resposta HTTP (o form não tem rota de saúde; / responde 404)
+      test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:$${PORT:-3001}/ 2>&1 | grep -q 'HTTP/'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  ms-omr:
+    <<: *app
+    image: vcnafacul/ms-omr:${OMR_TAG:-latest}
+    env_file: ["${ENV_DIR:-/home/deploy/env}/.env.omr"]
+    # Sem limite, como no subir_ms_omr.sh. Definir no card 05 depois de medir
+    # com `docker stats` lendo um cartão (OpenCV é o serviço mais pesado).
+    networks:
+      default:
+        aliases: [vcnafacul_ms_omr] # OMR_URL do ms-simulado
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  redis:
+    <<: *app
+    image: redis:7-alpine
+    # Efêmero de propósito (fila/cache de homol): reiniciar perde a fila.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "48mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 80m
+    memswap_limit: 160m
+    cpus: 0.3
+    networks:
+      default:
+        aliases: [vcnafacul_redis] # REDIS_HOST / REDIS_URL nos .env
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  mailpit:
+    <<: *app
+    image: axllent/mailpit:v1.27
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    volumes: ["mailpit_data:/data"]
+    networks:
+      default:
+        aliases: [mailpit] # proxy_pass do mail.homol e SMTP_HOST da api
+
+  nginx:
+    <<: *app
+    build:
+      context: ./nginx
+      dockerfile: nginx.dockerfile
+    image: vcnafacul-stack/nginx:local
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ${LETSENCRYPT_DIR:-/home/deploy/letsencrypt}:/etc/letsencrypt
+      # senha do mail.homol (htpasswd), fora do git — ver README, seção homol
+      - ${SEGREDOS_DIR:-/home/deploy/stack-segredos}/mail.htpasswd:/etc/nginx/mail.htpasswd:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t -q || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  mailpit_data:

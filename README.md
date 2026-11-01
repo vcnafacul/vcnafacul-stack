@@ -97,3 +97,60 @@ Do mais fraco para o mais forte:
   O seed completo é o card 055/04.
 - `node_modules` de cada app fica num volume (`vcnafacul-stack_*_node_modules`), compartilhado entre os modos.
   Dependência nova no `package.json` → `make restart s=<app>` (o `yarn install` roda no início do comando).
+
+## Homol (servidor) — `docker-compose.homol.yml` + `deploy.sh`
+
+Origem: `tickets/056`. No servidor de homol o stack roda com as **imagens do Docker Hub** (não bind-mount), sem
+bancos (MariaDB e Atlas ficam fora) e com o nginx na frente. Os `.env` continuam em `~/env/`, fora do git.
+
+```
+~/stack/            # clone deste repo
+~/env/              # .env (api), .env.ms, .env.form, .env.omr — como já é hoje
+~/stack-segredos/   # mail.htpasswd (senha do mail.homol)
+~/letsencrypt/  ~/Questoes/
+```
+
+### Deploy de um serviço
+
+```bash
+~/stack/deploy.sh form <sha>       # o CI chama assim; sem tag = latest
+~/stack/deploy.sh rollback form    # volta para a tag anterior
+~/stack/deploy.sh status
+```
+
+O `deploy.sh` faz `git pull` do stack, `pull` da imagem, roda as migrations (`api-migrate`, só na api; se falhar,
+para e a api antiga segue no ar), `up -d --no-deps` do serviço e espera o healthcheck. Os outros containers não são
+tocados. Tags em `.tags.env` e histórico em `.tags.history` (fora do git).
+
+Serviços: `api` `ms-simulado` `form` `ms-omr` `redis` `mailpit` `nginx`. Os containers ficam na rede
+`network-vcnafacul` com os **nomes antigos como alias** (`vcnafacul`, `vcnafacul_simulado_homol`,
+`vcnafacul_form`, `vcnafacul_ms_omr`, `vcnafacul_redis`, `mailpit`): os `.env` e o nginx não mudam.
+
+### Primeira vez no servidor
+
+```bash
+git clone git@github.com:vcnafacul/vcnafacul-stack.git ~/stack     # deploy key só leitura
+mkdir -p ~/stack-segredos
+read -s -p "senha do mail.homol: " S; echo
+printf 'vcnafacul:%s\n' "$(openssl passwd -apr1 "$S")" > ~/stack-segredos/mail.htpasswd; unset S
+```
+
+### Troca de um serviço do `subir_*.sh` para o compose
+
+Um por vez (form → ms-omr+redis → ms-simulado → api → nginx+mailpit), cards 04–08 do `tickets/056`:
+
+```bash
+docker inspect vcnafacul_form > ~/transicao-form.json   # guardar como estava
+docker rm -f vcnafacul_form                              # o deploy.sh recusa se o antigo existir
+~/stack/deploy.sh form
+# deu errado? docker compose -p vcnafacul -f ~/stack/docker-compose.homol.yml rm -sf form && ~/subir_form.sh
+```
+
+Depois do nginx: `~/stack/scripts/instalar-cron-renovacao.sh` (renovação do certificado pelo compose).
+
+### Testar localmente
+
+As imagens são amd64 e a VM do Mac é arm64: sob emulação, os limites de memória/CPU derrubam os apps (o mesmo
+`docker run` dos scripts antigos também cai). Para testar a mecânica, use uma cópia sem limites:
+`grep -vE '^\s+(mem_limit|memswap_limit|cpus):' docker-compose.homol.yml > teste.yml` e
+`ARQUIVO=teste.yml ENV_DIR=<pasta com envs falsos> DOCKER_DEFAULT_PLATFORM=linux/amd64 ./deploy.sh form`.
