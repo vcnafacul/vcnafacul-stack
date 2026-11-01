@@ -4,12 +4,13 @@
 # (`-p vcnafacul`), lê as tags de .tags.env e sobe um serviço por vez.
 #
 # Reproduz, flag a flag, os ~/subir_*.sh de antes (imagem, limites, env, rede,
-# volume). Diferenças de propósito:
+# volume Questoes, removido depois). Diferenças de propósito:
 #   - imagem por tag do commit (rollback), não só :latest;
 #   - migration da api ANTES do app (api-migrate), não depois;
 #   - nenhuma porta publicada fora o nginx (80/443) — o nginx chega na api e no
 #     Mailpit pela rede do docker;
-#   - healthcheck em todos.
+#   - healthcheck em todos;
+#   - sem a pasta Questoes (imagens no R2 — tickets/057, card 04).
 #
 # Bancos (MariaDB da Hostinger, Mongo Atlas) e bucket (R2) ficam FORA: vêm dos
 # arquivos em ENV_DIR (~/env), que continuam fora do git.
@@ -32,8 +33,6 @@ services:
     mem_limit: 350m
     memswap_limit: 700m
     cpus: 0.8
-    volumes:
-      - ${QUESTOES_DIR:-/home/deploy/Questoes}:/usr/share/nginx/html/images
     networks:
       default:
         aliases: [vcnafacul] # proxy_pass do nginx: http://vcnafacul:3333
